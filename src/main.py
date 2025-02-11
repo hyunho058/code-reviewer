@@ -69,50 +69,38 @@ def get_diff(owner: str, repo: str, pull_number: int) -> Optional[str]:
     logger.warning(f"No diff URL found for PR {pull_number}")
     return None
 
-
-def create_prompt(file_path: str, chunk: dict, pr_details: PullRequestDetails) -> str:
+def create_prompt(file_path: str, chunk: dict, pr_details: PullRequestDetails, original_code: str = "") -> str:
     if not isinstance(chunk, dict) or "content" not in chunk:
         logger.error("Invalid chunk format")
         return ""
 
     return f"""
-Your task is to review pull requests with a focus on **Object-Oriented Programming (OOP), code readability, and performance optimization**.
-Instructions:
-- Provide the response in following JSON format:  {{"reviews": [{{"lineNumber":  <line_number>, "reviewComment": "<review comment>"}}]}}
-- **Do not give positive comments or compliments.**
-- **Provide comments ONLY if there is something to improve.** If the code is fine, return an empty array: `"reviews": []`
-- **Write comments in GitHub Markdown format.**
-- **Focus on the following aspects when reviewing the code:**
-  1. **Object-Oriented Design (OOP)**:
-     - Does the code **follow SOLID principles** (Single Responsibility, Open-Closed, Liskov Substitution, Interface Segregation, Dependency Inversion)?
-     - Is there **tight coupling** that should be reduced?
-     - Should any logic be moved to a separate class or method for better reusability?
-     - Are there unnecessary static methods that could be refactored into instance methods?
-  2. **Code Readability**:
-     - Are variable and method names **clear and descriptive**?
-     - Is the **indentation and formatting consistent**?
-     - Are there **redundant or unnecessary lines of code**?
-  3. **Performance Optimization**:
-     - Are there **unnecessary loops, inefficient algorithms, or redundant calculations**?
-     - Are there **costly database calls or API requests inside loops**?
-     - Does the code **handle large inputs efficiently**?
-     - Should caching be considered to improve performance?
+    Your task is to review pull requests with a focus on **Object-Oriented Programming (OOP), code readability, and performance optimization**.
+    Instructions:
+    - Provide the response in following JSON format:  {{"reviews": [{{"lineNumber":  <line_number>, "reviewComment": "<review comment>"}}]}}
+    - **Do not give positive comments or compliments.**
+    - **Provide comments ONLY if there is something to improve.** If the code is fine, return an empty array: `"reviews": []`
+    - **Write comments in GitHub Markdown format.**
 
-**Review the following code diff** in the file "{file_path}" and take the pull request title and description into account when writing the response.
+    **Review the following code diff** in the file "{file_path}" and take the pull request title and description into account when writing the response.
 
-Pull request title: {pr_details.title}
-Pull request description:
+    **Pull request title**: {pr_details.title}
 
----
-{pr_details.description}
----
+    **Pull request description**:
+    ---
+    {pr_details.description}
+    ---
 
-Git diff to review:
+    **Original code (before changes)**:
+    ```java
+    {original_code}
+    ```
 
-```diff
-{chunk["content"]}
-```"""
-
+    **Git diff to review**:
+    ```diff
+    {chunk["content"]}
+    ```
+    """
 
 
 def get_ai_response(prompt: str, file_path: str) -> Optional[List[Dict[str, str]]]:
