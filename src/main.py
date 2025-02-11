@@ -69,38 +69,49 @@ def get_diff(owner: str, repo: str, pull_number: int) -> Optional[str]:
     logger.warning(f"No diff URL found for PR {pull_number}")
     return None
 
-def create_prompt(file_path: str, chunk: dict, pr_details: PullRequestDetails, original_code: str = "") -> str:
+
+def create_prompt(file_path: str, chunk: dict, pr_details: PullRequestDetails) -> str:
     if not isinstance(chunk, dict) or "content" not in chunk:
         logger.error("Invalid chunk format")
         return ""
 
     return f"""
-    Your task is to review pull requests with a focus on **Object-Oriented Programming (OOP), code readability, and performance optimization**.
-    Instructions:
-    - Provide the response in following JSON format:  {{"reviews": [{{"lineNumber":  <line_number>, "reviewComment": "<review comment>"}}]}}
-    - **Do not give positive comments or compliments.**
-    - **Provide comments ONLY if there is something to improve.** If the code is fine, return an empty array: `"reviews": []`
-    - **Write comments in GitHub Markdown format.**
+Your task is to review pull requests with a focus on **Object-Oriented Programming (OOP), code readability, and performance optimization**.
+Instructions:
+- Provide the response in following JSON format:  {{"reviews": [{{"lineNumber":  <line_number>, "reviewComment": "<review comment>"}}]}}
+- **Do not give positive comments or compliments.**
+- **Provide comments ONLY if there is something to improve.** If the code is fine, return an empty array: `"reviews": []`
+- **Write comments in GitHub Markdown format.**
+- **Focus on the following aspects when reviewing the code:**
+  1. **Object-Oriented Design (OOP)**:
+     - Does the code **follow SOLID principles** (Single Responsibility, Open-Closed, Liskov Substitution, Interface Segregation, Dependency Inversion)?
+     - Is there **tight coupling** that should be reduced?
+     - Should any logic be moved to a separate class or method for better reusability?
+     - Are there unnecessary static methods that could be refactored into instance methods?
+  2. **Code Readability**:
+     - Are variable and method names **clear and descriptive**?
+     - Is the **indentation and formatting consistent**?
+     - Are there **redundant or unnecessary lines of code**?
+  3. **Performance Optimization**:
+     - Are there **unnecessary loops, inefficient algorithms, or redundant calculations**?
+     - Are there **costly database calls or API requests inside loops**?
+     - Does the code **handle large inputs efficiently**?
+     - Should caching be considered to improve performance?
 
-    **Review the following code diff** in the file "{file_path}" and take the pull request title and description into account when writing the response.
+**Review the following code diff** in the file "{file_path}" and take the pull request title and description into account when writing the response.
 
-    **Pull request title**: {pr_details.title}
+Pull request title: {pr_details.title}
+Pull request description:
 
-    **Pull request description**:
-    ---
-    {pr_details.description}
-    ---
+---
+{pr_details.description}
+---
 
-    **Original code (before changes)**:
-    ```java
-    {original_code}
-    ```
+Git diff to review:
 
-    **Git diff to review**:
-    ```diff
-    {chunk["content"]}
-    ```
-    """
+```diff
+{chunk["content"]}
+```"""
 
 
 def get_ai_response(prompt: str, file_path: str) -> Optional[List[Dict[str, str]]]:
@@ -116,6 +127,7 @@ def get_ai_response(prompt: str, file_path: str) -> Optional[List[Dict[str, str]
         logger.debug(f"AI response: {response}")
         reviews = json.loads(response.choices[0].message.content).get("reviews", [])
 
+        # 각 리뷰에 파일 경로 추가
         for review in reviews:
             review["path"] = file_path
 
@@ -125,22 +137,18 @@ def get_ai_response(prompt: str, file_path: str) -> Optional[List[Dict[str, str]
     return []
 
 
-def create_comment(file_path: str, line, ai_responses: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    logger.debug(f"Creating comments for file {file_path}...")
+def create_comment(file_path: str, line_number: int, ai_responses: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    logger.debug(f"Creating comments for file {file_path} at line {line_number}...")
     comments = []
-
-    line_number = line.target_line_no  # 정확한 line number
     if line_number <= 0:
         logger.warning(f"Skipping invalid comment due to invalid line number: {line_number}")
         return []
-
     for ai_response in ai_responses:
         comments.append({
             "body": ai_response["reviewComment"],
             "path": file_path,
             "line": line_number
         })
-
     logger.debug(f"Generated {len(comments)} comments.")
     return comments
 
@@ -186,40 +194,38 @@ def analyze_code(parsed_diff: PatchSet, pr_details: PullRequestDetails) -> List[
     logger.debug("Analyzing code diff...")
     comments = []
 
-    file_reviews = {}
-
     for file in parsed_diff:
         logger.debug(f"Processing file: {file.path}")
 
         if file.path == "/dev/null":
             continue
 
-        changed_lines = []
+        # 파일 내에서 마지막 줄 번호를 계산 (추가된 라인, 컨텍스트 라인 모두 고려)
+        file_last_line = 0
         for hunk in file:
-            logger.debug(f"hunk: {hunk}")
             for line in hunk:
-                if line.is_added:
-                    logger.debug(f"Processing added line {line.target_line_no}: {line.value.strip()}")
-                    changed_lines.append(line)
+                if line.target_line_no and line.target_line_no > file_last_line:
+                    file_last_line = line.target_line_no
 
-        if changed_lines:
-            last_line = changed_lines[-1]
-            prompt = create_prompt(file.path, {"content": last_line.value.strip()}, pr_details)
+        if file_last_line <= 0:
+            logger.warning(f"No valid last line found for file {file.path}. Skipping.")
+            continue
+
+        # 각 하일(변경 단위)별로 리뷰 생성
+        for hunk in file:
+            hunk_added_lines = [line.value.strip() for line in hunk if line.is_added]
+            if not hunk_added_lines:
+                continue
+
+            aggregated_content = "\n".join(hunk_added_lines)
+            prompt = create_prompt(file.path, {"content": aggregated_content}, pr_details)
             ai_response = get_ai_response(prompt, file.path)
             if ai_response:
-                new_comments = create_comment(file.path, last_line, ai_response)
-                # 해당 파일에 대한 리뷰를 file_reviews에 저장
-                if file.path not in file_reviews:
-                    file_reviews[file.path] = []
-                file_reviews[file.path].extend(new_comments)
-
-    for file_path, file_comment in file_reviews.items():
-        for comment in file_comment:
-            comments.append(comment)
+                new_comments = create_comment(file.path, file_last_line, ai_response)
+                comments.extend(new_comments)
 
     logger.debug(f"Total {len(comments)} comments analyzed.")
     return comments
-
 
 
 def main():
