@@ -198,25 +198,40 @@ def analyze_code(parsed_diff: PatchSet, pr_details: PullRequestDetails) -> List[
     logger.debug("Analyzing code diff...")
     comments = []
 
+    file_reviews = {}
+
     for file in parsed_diff:
         logger.debug(f"Processing file: {file.path}")
 
         if file.path == "/dev/null":
             continue
 
+        changed_lines = []
         for hunk in file:
             logger.debug(f"hunk: {hunk}")
             for line in hunk:
                 if line.is_added:
                     logger.debug(f"Processing added line {line.target_line_no}: {line.value.strip()}")
-                    prompt = create_prompt(file.path, {"content": line.value.strip()}, pr_details)
-                    ai_response = get_ai_response(prompt, file.path)
-                    if ai_response:
-                        new_comments = create_comment(file.path, line, ai_response)
-                        comments.extend(new_comments)
+                    changed_lines.append(line)
+
+        if changed_lines:
+            last_line = changed_lines[-1]
+            prompt = create_prompt(file.path, {"content": last_line.value.strip()}, pr_details)
+            ai_response = get_ai_response(prompt, file.path)
+            if ai_response:
+                new_comments = create_comment(file.path, last_line, ai_response)
+                # 해당 파일에 대한 리뷰를 file_reviews에 저장
+                if file.path not in file_reviews:
+                    file_reviews[file.path] = []
+                file_reviews[file.path].extend(new_comments)
+
+    for file_path, file_comment in file_reviews.items():
+        for comment in file_comment:
+            comments.append(comment)
 
     logger.debug(f"Total {len(comments)} comments analyzed.")
     return comments
+
 
 
 def main():
