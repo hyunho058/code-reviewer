@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import openai
 import requests
 import logging
@@ -67,44 +68,41 @@ def get_diff(owner: str, repo: str, pull_number: int) -> Optional[str]:
     return None
 
 
-def create_prompt(file_path: str, diff_content: str, pr_details: PullRequestDetails) -> str:
-
+def create_prompt(aggregated_diff: str, pr_details: PullRequestDetails) -> str:
+    """
+    PR 전체 변경사항(aggregated_diff)을 하나로 묶어 AI에게 전달할 프롬프트를 생성.
+    """
     return f"""
-Your task is to review pull requests with a focus on **Object-Oriented Programming (OOP), code readability, and performance optimization**.
+Your task is to review this entire pull request with a focus on **Object-Oriented Programming (OOP), code readability, and performance optimization**.
 Instructions:
-- Provide the response in following JSON format:  {{"reviews": [{{"lineNumber":  <line_number>, "reviewComment": "<review comment>"}}]}}
+- Provide the response in following JSON format:  {{"reviews": [{{"lineNumber": <line_number>, "reviewComment": "<review comment>"}}]}}
 - **Do not give positive comments or compliments.**
 - **Provide comments ONLY if there is something to improve.** If the code is fine, return an empty array: `"reviews": []`
 - **Write comments in GitHub Markdown format.**
 - **Focus on the following aspects when reviewing the code:**
   1. **Object-Oriented Design (OOP)**:
-     - Does the code **follow SOLID principles** (Single Responsibility, Open-Closed, Liskov Substitution, Interface Segregation, Dependency Inversion)?
+     - Does the code **follow SOLID principles**?
      - Is there **tight coupling** that should be reduced?
-     - Should any logic be moved to a separate class or method for better reusability?
-     - Are there unnecessary static methods that could be refactored into instance methods?
+     - Could logic be moved to a separate class or method for better reusability?
   2. **Code Readability**:
      - Are variable and method names **clear and descriptive**?
      - Is the **indentation and formatting consistent**?
      - Are there **redundant or unnecessary lines of code**?
   3. **Performance Optimization**:
-     - Are there **unnecessary loops, inefficient algorithms, or redundant calculations**?
-     - Are there **costly database calls or API requests inside loops**?
-     - Does the code **handle large inputs efficiently**?
-     - Should caching be considered to improve performance?
-
-**Review the following code diff** in the file "{file_path}" and take the pull request title and description into account when writing the response.
+     - Any **unnecessary loops, inefficient algorithms, or redundant calculations**?
+     - Any **costly database calls or API requests inside loops**?
+     - Could the code **handle large inputs more efficiently**?
 
 Pull request title: {pr_details.title}
 Pull request description:
-
 ---
 {pr_details.description}
 ---
 
-Git diff to review:
+Below is the aggregated diff of all files changed in this PR:
 
 ```diff
-{diff_content}
+{aggregated_diff}
 ```"""
 
 
@@ -114,18 +112,29 @@ def get_ai_response(prompt: str) -> Optional[List[Dict[str, str]]]:
         response = client.chat.completions.create(
             model=OPENAI_API_MODEL,
             messages=[{"role": "system", "content": prompt}],
-            max_tokens=700,
+            max_tokens=1000,
             temperature=0.2,
         )
         logger.debug(f"AI response: {response}")
-        reviews = json.loads(response.choices[0].message.content).get("reviews", [])
+
+        content = response.choices[0].message.content
+        content = re.sub(r"```(\w+)?", "", content)
+        content = content.replace("```", "").strip()
+
+        data = json.loads(content)
+        reviews = data.get("reviews", [])
         return reviews
+
     except Exception as error:
         logger.error(f"Error getting AI response: {error}")
     return []
 
 
 def combine_reviews_into_single_comment(reviews: List[Dict[str, str]]) -> str:
+    """
+    AI가 반환한 여러 리뷰를 하나의 문자열로 합침.
+    (lineNumber는 여기서는 참고용으로만 사용하거나, 필요없으면 생략 가능)
+    """
     if not reviews:
         return ""
 
@@ -135,99 +144,71 @@ def combine_reviews_into_single_comment(reviews: List[Dict[str, str]]) -> str:
         comment_body = review.get("reviewComment", "")
         comment_lines.append(f"**Line {ln}**:\n{comment_body}\n")
 
+    # 여러 리뷰 사이에 줄바꿈 추가
     return "\n".join(comment_lines).strip()
 
 
-def create_review_comment(owner: str, repo: str, pull_number: int, comments: List[Dict[str, str]]):
-    logger.debug(f"Creating review comments for PR {pull_number}...")
+def create_issue_comment(owner: str, repo: str, pull_number: int, body: str):
+    """
+    PR(이슈) 하단에 단일 코멘트(이슈 코멘트)를 작성하는 함수.
+    """
+    logger.debug(f"Creating single issue comment for PR {pull_number}...")
+    url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pull_number}/comments"
 
-    valid_comments = []
-    for comment in comments:
-        if comment["line"] > 0:
-            valid_comments.append({
-                "body": comment["body"],
-                "path": comment["path"],
-                "line": comment["line"],
-                "side": "RIGHT"
-            })
-        else:
-            logger.warning(f"Skipping invalid comment: {comment}")
-
-    if not valid_comments:
-        logger.info("No valid comments to post.")
-        return
-
-    url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pull_number}/reviews"
     headers = {
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
     }
     data = {
-        "event": "COMMENT",
-        "comments": valid_comments
+        "body": body
     }
 
-    logger.debug(f"Review comments data: {data}")
     response = requests.post(url, json=data, headers=headers)
-    if response.status_code == 200:
-        logger.info("Review comments created successfully.")
+    if response.status_code == 201:
+        logger.info("Issue comment created successfully.")
     else:
-        logger.error(f"Failed to create review comment: {response.text}")
+        logger.error(f"Failed to create issue comment: {response.text}")
 
 
-def analyze_code(parsed_diff: PatchSet, pr_details: PullRequestDetails) -> List[Dict[str, str]]:
+def analyze_code(parsed_diff: PatchSet, pr_details: PullRequestDetails) -> str:
+    """
+    1) 모든 파일의 '추가된 라인'을 합쳐서 하나의 aggregated_diff를 만든 뒤,
+    2) 그걸 AI에 전달하여 종합 리뷰를 얻고,
+    3) 리뷰 내용을 단일 문자열로 반환.
+    """
     logger.debug("Analyzing code diff...")
-    comments = []
+
+    # 1) 모든 파일에서 추가된 라인만 모아서 하나의 diff 문자열 생성
+    aggregated_diff_lines = []
 
     for file in parsed_diff:
-        logger.debug(f"Processing file: {file.path}")
-
         if file.path == "/dev/null":
             continue
 
-        # 1) 파일 마지막 라인 번호 구하기
-        file_last_line = 0
-        for hunk in file:
-            for line in hunk:
-                if line.target_line_no and line.target_line_no > file_last_line:
-                    file_last_line = line.target_line_no
-
-        if file_last_line <= 0:
-            logger.warning(f"No valid last line found for file {file.path}. Skipping.")
-            continue
-
-        # 2) 이 파일 전체에서 추가된 라인만 모아서 하나의 diff_content 생성
-        all_added_lines = []
+        # 파일 헤더를 diff 스타일로 추가 (선택사항)
+        aggregated_diff_lines.append(f"diff --git a/{file.path} b/{file.path}")
         for hunk in file:
             for line in hunk:
                 if line.is_added:
-                    # 실제 diff 형식으로 보기 위해 앞에 '+' 추가 등 처리 (선택사항)
-                    all_added_lines.append(f"+ {line.value.strip()}")
+                    # 실제 diff 표기: 앞에 '+' 붙이기
+                    aggregated_diff_lines.append(f"+ {line.value.strip()}")
 
-        if not all_added_lines:
-            continue
+    if not aggregated_diff_lines:
+        logger.debug("No added lines found in this PR.")
+        return ""  # 변경사항이 없으면 빈 문자열
 
-        diff_content = "\n".join(all_added_lines)
+    aggregated_diff = "\n".join(aggregated_diff_lines)
 
-        # 3) 파일 전체 변경 내용에 대한 프롬프트 생성 & AI 응답 받기
-        prompt = create_prompt(file.path, diff_content, pr_details)
-        ai_reviews = get_ai_response(prompt)
+    # 2) AI에 리뷰 요청
+    prompt = create_prompt(aggregated_diff, pr_details)
+    ai_reviews = get_ai_response(prompt)
+    if not ai_reviews:
+        logger.debug("No AI reviews returned or empty array.")
+        return ""  # AI가 별다른 리뷰가 없으면 빈 문자열
 
-        # 4) AI 리뷰를 하나의 코멘트로 합침
-        comment_body = combine_reviews_into_single_comment(ai_reviews)
-        if not comment_body:
-            # 개선할 점이 없으면(빈 배열) 스킵
-            continue
-
-        # 5) 한 파일당 하나의 코멘트만 생성
-        comments.append({
-            "body": comment_body,
-            "path": file.path,
-            "line": file_last_line
-        })
-
-    logger.debug(f"Total {len(comments)} comments analyzed.")
-    return comments
+    # 3) 리뷰 결과를 하나의 문자열로 합침
+    comment_body = combine_reviews_into_single_comment(ai_reviews)
+    return comment_body
 
 
 def main():
@@ -236,9 +217,9 @@ def main():
 
     with open(os.getenv("GITHUB_EVENT_PATH"), "r") as file:
         event_data = json.load(file)
-
     logger.debug(f"Event data: {event_data}")
 
+    # PR action이 열리거나 동기화(synchronize)된 경우에만 동작
     if event_data["action"] in ["opened", "synchronize"]:
         diff = get_diff(pr_details.owner, pr_details.repo, pr_details.pull_number)
     else:
@@ -246,19 +227,19 @@ def main():
         return
 
     if not diff:
-        logger.warning("No diff found")
+        logger.warning("No diff found.")
         return
 
     parsed_diff = PatchSet(io.StringIO(diff))
 
-    # 모든 파일에 대한 리뷰 코멘트 목록 생성
-    comments = analyze_code(parsed_diff, pr_details)
+    # 종합 리뷰 생성
+    comment_body = analyze_code(parsed_diff, pr_details)
+    if not comment_body:
+        logger.info("No comments generated by AI.")
+        return
 
-    # 코멘트가 있다면 실제로 GitHub PR에 작성
-    if comments:
-        create_review_comment(pr_details.owner, pr_details.repo, pr_details.pull_number, comments)
-    else:
-        logger.info("No comments generated.")
+    # 생성된 리뷰를 PR(이슈) 하단에 단일 코멘트로 작성
+    create_issue_comment(pr_details.owner, pr_details.repo, pr_details.pull_number, comment_body)
 
 
 if __name__ == "__main__":
