@@ -69,29 +69,63 @@ def get_diff(owner: str, repo: str, pull_number: int) -> Optional[str]:
 
 
 def create_prompt(aggregated_diff: str, pr_details: PullRequestDetails) -> str:
-    """
-    PR 전체 변경사항(aggregated_diff)을 하나로 묶어 AI에게 전달할 프롬프트를 생성.
-    """
     return f"""
-Your task is to review this entire pull request with a focus on **Object-Oriented Programming (OOP), code readability, and performance optimization**.
-Instructions:
-- Provide the response in following JSON format:  {{"reviews": [{{"lineNumber": <line_number>, "reviewComment": "<review comment>"}}]}}
-- **Do not give positive comments or compliments.**
-- **Provide comments ONLY if there is something to improve.** If the code is fine, return an empty array: `"reviews": []`
-- **Write comments in GitHub Markdown format.**
-- **Focus on the following aspects when reviewing the code:**
-  1. **Object-Oriented Design (OOP)**:
-     - Does the code **follow SOLID principles**?
-     - Is there **tight coupling** that should be reduced?
-     - Could logic be moved to a separate class or method for better reusability?
-  2. **Code Readability**:
-     - Are variable and method names **clear and descriptive**?
-     - Is the **indentation and formatting consistent**?
-     - Are there **redundant or unnecessary lines of code**?
-  3. **Performance Optimization**:
-     - Any **unnecessary loops, inefficient algorithms, or redundant calculations**?
-     - Any **costly database calls or API requests inside loops**?
-     - Could the code **handle large inputs more efficiently**?
+You are an automated code review assistant. Your review output **must** follow the structure below **exactly**:
+
+[AI Review]
+
+**1.개요**
+(이 Pull Request의 요약 및 주요 변경 사항을 간단히 설명)
+
+**2.분석 영역**
+
+2.1 런타임 오류 검사
+(런타임 에러 가능성, NPE, IndexError 등)
+
+2.2 성능 최적화
+(비효율적인 루프, 불필요한 연산, 리소스 낭비, DB 호출 최적화 등)
+
+2.3 코드 스타일 및 가독성
+(가독성, 네이밍, 불필요한 코드, 포맷팅, 클래스/메서드 분리 등)
+
+2.4 취약점 분석
+- 접근 통제 취약점
+- 암호화 실패
+- 인젝션
+- 안전하지 않은 설계
+- 보안 설정 오류
+- 취약하고 오래된 구성요소
+- 식별 및 인증 실패
+- 소프트웨어 및 데이터 무결성 실패
+- 보안 로깅 및 모니터링 실패
+- 서버 사이드 요청 위조(SSRF)
+- 사용되지 않거나 안전하지 않은 모듈 사용
+- 검증되지 않은 입력 처리
+- 민감한 데이터의 부적절한 처리
+- 민감한 정보 노출 (예: 하드코딩된 비밀번호)
+- 기타 보안 위험
+
+(위 항목들 중 발견된 취약점 또는 개선 사항이 있으면 제시하고, 없다면 '결과: 취약점 없음' 식으로 표기)
+
+**3.종합 의견**
+(최종 요약 및 의견 제시)
+
+##중요##:
+- 절대로 코드블록(\`\`\`)이나 JSON 포맷이 아닌 **위의 텍스트 구조** 그대로만 출력하세요.
+- **긍정적 코멘트나 칭찬은 작성하지 말고**, 개선점이 있는 경우에만 작성하세요.
+- 만약 개선할 점이 전혀 없다면, 2번 항목(분석 영역)에서 각 섹션에 "발견되지 않음"이라고 쓰고, 3번 항목에서도 별도 개선점 없이 마무리하세요.
+- **2.분석 영역 항목에 대한 의견을 작성할때는 다음과 같이 코드 블록을 작성하세요** **(예시):
+
+수정 전:
+```java
+기존 java 코드블럭
+```
+
+수정 후:
+```java
+개선된 java 코드블럭
+```
+**
 
 Pull request title: {pr_details.title}
 Pull request description:
@@ -99,14 +133,15 @@ Pull request description:
 {pr_details.description}
 ---
 
-Below is the aggregated diff of all files changed in this PR:
-
-```diff
+아래는 Pull Request에서 변경된 코드 diff 전체입니다:
+(diff 시작)
 {aggregated_diff}
-```"""
+(diff 끝)
 
+분석 결과를 위의 구조대로 작성해주세요.
+"""
 
-def get_ai_response(prompt: str) -> Optional[List[Dict[str, str]]]:
+def get_ai_review_text(prompt: str) -> str:
     logger.debug("Requesting AI review response...")
     try:
         response = client.chat.completions.create(
@@ -117,41 +152,20 @@ def get_ai_response(prompt: str) -> Optional[List[Dict[str, str]]]:
         )
         logger.debug(f"AI response: {response}")
 
+        # AI가 생성한 텍스트
         content = response.choices[0].message.content
+        # 혹시 남아있을 수 있는 코드 펜스 제거
         content = re.sub(r"```(\w+)?", "", content)
         content = content.replace("```", "").strip()
 
-        data = json.loads(content)
-        reviews = data.get("reviews", [])
-        return reviews
+        return content
 
     except Exception as error:
         logger.error(f"Error getting AI response: {error}")
-    return []
-
-
-def combine_reviews_into_single_comment(reviews: List[Dict[str, str]]) -> str:
-    """
-    AI가 반환한 여러 리뷰를 하나의 문자열로 합침.
-    (lineNumber는 여기서는 참고용으로만 사용하거나, 필요없으면 생략 가능)
-    """
-    if not reviews:
-        return ""
-
-    comment_lines = []
-    for review in reviews:
-        ln = review.get("lineNumber", "N/A")
-        comment_body = review.get("reviewComment", "")
-        comment_lines.append(f"**Line {ln}**:\n{comment_body}\n")
-
-    # 여러 리뷰 사이에 줄바꿈 추가
-    return "\n".join(comment_lines).strip()
+    return ""
 
 
 def create_issue_comment(owner: str, repo: str, pull_number: int, body: str):
-    """
-    PR(이슈) 하단에 단일 코멘트(이슈 코멘트)를 작성하는 함수.
-    """
     logger.debug(f"Creating single issue comment for PR {pull_number}...")
     url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pull_number}/comments"
 
@@ -159,9 +173,7 @@ def create_issue_comment(owner: str, repo: str, pull_number: int, body: str):
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
     }
-    data = {
-        "body": body
-    }
+    data = {"body": body}
 
     response = requests.post(url, json=data, headers=headers)
     if response.status_code == 201:
@@ -171,44 +183,28 @@ def create_issue_comment(owner: str, repo: str, pull_number: int, body: str):
 
 
 def analyze_code(parsed_diff: PatchSet, pr_details: PullRequestDetails) -> str:
-    """
-    1) 모든 파일의 '추가된 라인'을 합쳐서 하나의 aggregated_diff를 만든 뒤,
-    2) 그걸 AI에 전달하여 종합 리뷰를 얻고,
-    3) 리뷰 내용을 단일 문자열로 반환.
-    """
     logger.debug("Analyzing code diff...")
 
-    # 1) 모든 파일에서 추가된 라인만 모아서 하나의 diff 문자열 생성
     aggregated_diff_lines = []
-
     for file in parsed_diff:
         if file.path == "/dev/null":
             continue
 
-        # 파일 헤더를 diff 스타일로 추가 (선택사항)
         aggregated_diff_lines.append(f"diff --git a/{file.path} b/{file.path}")
         for hunk in file:
             for line in hunk:
                 if line.is_added:
-                    # 실제 diff 표기: 앞에 '+' 붙이기
                     aggregated_diff_lines.append(f"+ {line.value.strip()}")
 
     if not aggregated_diff_lines:
         logger.debug("No added lines found in this PR.")
-        return ""  # 변경사항이 없으면 빈 문자열
+        return ""
 
     aggregated_diff = "\n".join(aggregated_diff_lines)
 
-    # 2) AI에 리뷰 요청
     prompt = create_prompt(aggregated_diff, pr_details)
-    ai_reviews = get_ai_response(prompt)
-    if not ai_reviews:
-        logger.debug("No AI reviews returned or empty array.")
-        return ""  # AI가 별다른 리뷰가 없으면 빈 문자열
-
-    # 3) 리뷰 결과를 하나의 문자열로 합침
-    comment_body = combine_reviews_into_single_comment(ai_reviews)
-    return comment_body
+    ai_review_text = get_ai_review_text(prompt)
+    return ai_review_text
 
 
 def main():
@@ -219,7 +215,6 @@ def main():
         event_data = json.load(file)
     logger.debug(f"Event data: {event_data}")
 
-    # PR action이 열리거나 동기화(synchronize)된 경우에만 동작
     if event_data["action"] in ["opened", "synchronize"]:
         diff = get_diff(pr_details.owner, pr_details.repo, pr_details.pull_number)
     else:
@@ -232,14 +227,12 @@ def main():
 
     parsed_diff = PatchSet(io.StringIO(diff))
 
-    # 종합 리뷰 생성
-    comment_body = analyze_code(parsed_diff, pr_details)
-    if not comment_body:
+    review_text = analyze_code(parsed_diff, pr_details)
+    if not review_text:
         logger.info("No comments generated by AI.")
         return
 
-    # 생성된 리뷰를 PR(이슈) 하단에 단일 코멘트로 작성
-    create_issue_comment(pr_details.owner, pr_details.repo, pr_details.pull_number, comment_body)
+    create_issue_comment(pr_details.owner, pr_details.repo, pr_details.pull_number, review_text)
 
 
 if __name__ == "__main__":
