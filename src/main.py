@@ -1,13 +1,14 @@
-import os
+import io
 import json
+import logging
+import os
 import re
+from typing import Optional
+
 import openai
 import requests
-import logging
 from github import Github
-from typing import List, Dict, Optional
 from unidiff import PatchSet
-import io
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -141,6 +142,7 @@ Pull request description:
 분석 결과를 위의 구조대로 작성해주세요.
 """
 
+
 def get_ai_review_text(prompt: str) -> str:
     logger.debug("Requesting AI review response...")
     try:
@@ -152,9 +154,8 @@ def get_ai_review_text(prompt: str) -> str:
         )
         logger.debug(f"AI response: {response}")
 
-        # AI가 생성한 텍스트
         content = response.choices[0].message.content
-        # 혹시 남아있을 수 있는 코드 펜스 제거
+
         content = re.sub(r"```(\w+)?", "", content)
         content = content.replace("```", "").strip()
 
@@ -165,6 +166,7 @@ def get_ai_review_text(prompt: str) -> str:
     return ""
 
 
+# github api document [https://docs.github.com/ko/rest/pulls/reviews]
 def create_issue_comment(owner: str, repo: str, pull_number: int, body: str):
     logger.debug(f"Creating single issue comment for PR {pull_number}...")
     url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pull_number}/comments"
